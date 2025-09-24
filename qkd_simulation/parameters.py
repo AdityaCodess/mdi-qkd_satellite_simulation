@@ -18,13 +18,9 @@ DETECTOR_DEAD_TIME = 50e-9  # Dead time in seconds
 
 # --- Protocol Parameters ---
 REPETITION_RATE = 1e9     # System pulse rate in Hz (1 GHz)
-# MDI-QKD requires signal and decoy states
 DECOY_INTENSITIES = {
     'signal': 0.5,
     'decoy': 0.1,
     'vacuum': 0.0
 }
-
-# --- Simulation Parameters ---
-QBER_INTRINSIC = 0.01  # 1% intrinsic error from optical imperfections
 ERROR_CORRECTION_EFFICIENCY = 1.16 # Typical efficiency factor for error correction

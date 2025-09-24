@@ -16,6 +16,9 @@ class SimulationGUI:
         self.create_widgets()
 
     def create_widgets(self):
+        # This function remains the same as the last version
+        # It correctly sets up all the UI elements.
+        
         # --- Input Frame ---
         input_frame = ttk.LabelFrame(self.master, text="Input Parameters")
         input_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ns")
@@ -33,15 +36,10 @@ class SimulationGUI:
         ttk.Label(input_frame, text="Graph Type:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
         self.graph_type = tk.StringVar(value="SKR vs. Range")
         graph_options = [
-            "SKR vs. Range", 
-            "Total Loss vs. Range", 
-            "QBER vs. Range", 
-            "Received Power vs. Tx Power", 
-            "QBER vs. Total Loss",
-            "SKR vs. Pointing Error (ISL)", 
-            "SKR vs. Turbulence (GTS)",
-            "SKR vs. QBER", 
-            "Key Rate Components vs. Range"
+            "SKR vs. Range", "Total Loss vs. Range", "QBER vs. Range", 
+            "Received Power vs. Tx Power", "QBER vs. Total Loss",
+            "SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)",
+            "SKR vs. QBER", "Key Rate Components vs. Range"
         ]
         self.graph_combo = ttk.Combobox(input_frame, textvariable=self.graph_type, values=graph_options, state="readonly")
         self.graph_combo.grid(row=4, column=0, padx=5, pady=2, sticky="ew")
@@ -72,6 +70,9 @@ class SimulationGUI:
         self.pointing_label.grid(row=15, column=0, sticky="w", padx=5, pady=2)
         self.pointing_entry = ttk.Entry(input_frame); self.pointing_entry.grid(row=16, column=0, padx=5, pady=2); self.pointing_entry.insert(0, "1.0")
         
+        ttk.Label(input_frame, text="Intrinsic QBER (%):").grid(row=17, column=0, sticky="w", padx=5, pady=2)
+        self.qber_entry = ttk.Entry(input_frame); self.qber_entry.grid(row=18, column=0, padx=5, pady=2); self.qber_entry.insert(0, "1.0")
+
         # Plot Frame and Controls
         plot_frame = ttk.LabelFrame(self.master, text="Simulation Results")
         plot_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
@@ -130,12 +131,14 @@ class SimulationGUI:
     def run_simulation(self):
         self.status_label.config(text="Status: Running..."); self.master.update_idletasks()
 
+        # Get all parameters from UI
         protocol_choice = self.protocol_type.get()
         link_type = self.link_type.get()
         range_param = float(self.range_entry.get())
         divergence = float(self.divergence_entry.get())
         graph_choice = self.graph_type.get()
-        
+        intrinsic_qber = float(self.qber_entry.get()) / 100.0
+
         protocol = DecoyBB84Protocol() if protocol_choice == "Decoy-State BB84" else MDIQKDProtocol()
         
         # --- Main Dispatcher for Different Graph Types ---
@@ -147,24 +150,28 @@ class SimulationGUI:
             for r in ranges_km:
                 channel = InterSatelliteLink(range_km=r, divergence_mrad=divergence, pointing_error_urad=float(self.pointing_entry.get())) if link_type == 'ISL' else \
                           GroundToSatelliteLink(range_km=r, divergence_mrad=divergence, turbulence_strength=self.turbulence_combo.get())
-                props = channel.get_channel_properties()
+                props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
                 res = protocol.calculate_skr(props)
                 results['loss'].append(props['total_loss_db']); results['qber'].append(props['effective_qber'])
                 results['skr'].append(res['skr']); results['useful'].append(res['useful_rate']); results['leakage'].append(res['leakage_rate'])
 
-            # --- PLOTTING LOGIC FOR ALL "VS. RANGE" GRAPHS ---
+            # --- RESTORED PLOTTING LOGIC FOR ALL "VS. RANGE" GRAPHS ---
             if graph_choice == "SKR vs. Range":
                 self.update_plot(ranges_km, results['skr'], f"{protocol_choice} on {link_type}", "Range (km)", "SKR (bits/pulse)", yscale='log')
                 self.status_label.config(text=f"Status: Complete. Final SKR at {range_param} km: {results['skr'][-1]:.2e} bits/pulse")
+            
             elif graph_choice == "Total Loss vs. Range":
                 self.update_plot(ranges_km, results['loss'], f"{link_type} Performance", "Range (km)", "Total Loss (dB)")
                 self.status_label.config(text=f"Status: Complete. Final Loss at {range_param} km: {results['loss'][-1]:.2f} dB")
+            
             elif graph_choice == "QBER vs. Range":
-                self.update_plot(ranges_km, results['qber'], f"{link_type} Performance", "Range (km)", "Effective QBER")
+                self.update_plot(ranges_km, results['qber'], f"{link_type} Performance", "Range (km)", "Effective QBER", yscale='linear')
                 self.status_label.config(text=f"Status: Complete. Final QBER at {range_param} km: {results['qber'][-1]:.2%}")
+            
             elif graph_choice == "QBER vs. Total Loss":
                 self.update_plot(results['loss'], results['qber'], f"{link_type} Performance", "Total Loss (dB)", "Effective QBER")
                 self.status_label.config(text=f"Status: Complete. Final QBER: {results['qber'][-1]:.2%}")
+
             elif graph_choice == "Key Rate Components vs. Range":
                 self.update_plot(ranges_km, results['useful'], f"{protocol_choice} Components on {link_type}", "Range (km)", "Rate (bits/pulse)", yscale='log', 
                                  y2=results['leakage'], label1='Useful Rate', label2='Leakage Rate')
@@ -174,7 +181,7 @@ class SimulationGUI:
         elif graph_choice == "Received Power vs. Tx Power":
             channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, pointing_error_urad=float(self.pointing_entry.get())) if link_type == 'ISL' else \
                       GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, turbulence_strength=self.turbulence_combo.get())
-            props = channel.get_channel_properties()
+            props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
             total_loss_db = props['total_loss_db']
             tx_powers_dbm = np.linspace(-20, 10, 30)
             rx_powers_dbm = tx_powers_dbm - total_loss_db
@@ -186,7 +193,8 @@ class SimulationGUI:
             skr_results = []
             for pe in pointing_errors:
                 channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, pointing_error_urad=pe)
-                skr_results.append(protocol.calculate_skr(channel.get_channel_properties())['skr'])
+                props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
+                skr_results.append(protocol.calculate_skr(props)['skr'])
             self.update_plot(pointing_errors, skr_results, f"{protocol_choice} at {range_param}km", "Pointing Error (µrad)", "SKR (bits/pulse)", yscale='log')
             self.status_label.config(text=f"Status: Complete. Analysis of pointing error sensitivity.")
 
@@ -195,20 +203,24 @@ class SimulationGUI:
             skr_results = []
             for tl in turbulence_levels:
                 channel = GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, turbulence_strength=tl)
-                skr_results.append(protocol.calculate_skr(channel.get_channel_properties())['skr'])
+                props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
+                skr_results.append(protocol.calculate_skr(props)['skr'])
             self.update_plot(turbulence_levels, skr_results, f"{protocol_choice} at {range_param}km", "Turbulence Strength", "SKR (bits/pulse)", is_bar=True, yscale='log')
             self.status_label.config(text=f"Status: Complete. Analysis of turbulence resilience.")
             
         elif graph_choice == "SKR vs. QBER":
             qber_values = np.linspace(0, 0.15, 30)
             skr_results = []
-            channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence) if link_type == 'ISL' else \
-                      GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence)
-            props = channel.get_channel_properties()
+            channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, pointing_error_urad=float(self.pointing_entry.get())) if link_type == 'ISL' else \
+                      GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, turbulence_strength=self.turbulence_combo.get())
+            # Get fixed loss from the channel, but ignore its QBER calculation
+            base_props = channel.get_channel_properties(intrinsic_qber=0) 
+            
             for qber in qber_values:
-                props['effective_qber'] = qber
-                skr_results.append(protocol.calculate_skr(props)['skr'])
-            self.update_plot(qber_values * 100, skr_results, f"{protocol_choice} at {range_param}km", "QBER (%)", "SKR (bits/pulse)", yscale='log')
+                # Manually create the properties dictionary for each QBER value
+                current_props = {'total_loss_db': base_props['total_loss_db'], 'effective_qber': qber}
+                skr_results.append(protocol.calculate_skr(current_props)['skr'])
+            self.update_plot(qber_values * 100, skr_results, f"{protocol_choice} at {range_param}km", "Total Effective QBER (%)", "SKR (bits/pulse)", yscale='log')
             self.status_label.config(text=f"Status: Complete. Analysis of error tolerance.")
 
 if __name__ == "__main__":
