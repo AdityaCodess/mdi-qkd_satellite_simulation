@@ -16,9 +16,6 @@ class SimulationGUI:
         self.create_widgets()
 
     def create_widgets(self):
-        # This function remains the same as the last version
-        # It correctly sets up all the UI elements.
-        
         # --- Input Frame ---
         input_frame = ttk.LabelFrame(self.master, text="Input Parameters")
         input_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ns")
@@ -73,6 +70,19 @@ class SimulationGUI:
         ttk.Label(input_frame, text="Intrinsic QBER (%):").grid(row=17, column=0, sticky="w", padx=5, pady=2)
         self.qber_entry = ttk.Entry(input_frame); self.qber_entry.grid(row=18, column=0, padx=5, pady=2); self.qber_entry.insert(0, "1.0")
 
+        # --- NEW WIDGETS FOR TRANSMITTED POWER ---
+        self.tx_power_min_label = ttk.Label(input_frame, text="Min Tx Power (dBm):")
+        self.tx_power_min_label.grid(row=19, column=0, sticky="w", padx=5, pady=2)
+        self.tx_power_min_entry = ttk.Entry(input_frame)
+        self.tx_power_min_entry.grid(row=20, column=0, padx=5, pady=2)
+        self.tx_power_min_entry.insert(0, "-20")
+
+        self.tx_power_max_label = ttk.Label(input_frame, text="Max Tx Power (dBm):")
+        self.tx_power_max_label.grid(row=21, column=0, sticky="w", padx=5, pady=2)
+        self.tx_power_max_entry = ttk.Entry(input_frame)
+        self.tx_power_max_entry.grid(row=22, column=0, padx=5, pady=2)
+        self.tx_power_max_entry.insert(0, "10")
+
         # Plot Frame and Controls
         plot_frame = ttk.LabelFrame(self.master, text="Simulation Results")
         plot_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
@@ -96,12 +106,21 @@ class SimulationGUI:
 
     def toggle_inputs(self, event=None):
         is_isl = self.link_type.get() == "ISL"
+        graph_choice = self.graph_type.get()
+        
+        # Toggle link-specific inputs
         self.turbulence_label.config(state='disabled' if is_isl else 'normal')
         self.turbulence_combo.config(state='disabled' if is_isl else 'normal')
         self.pointing_label.config(state='normal' if is_isl else 'disabled')
         self.pointing_entry.config(state='normal' if is_isl else 'disabled')
         
-        graph_choice = self.graph_type.get()
+        # Toggle graph-specific inputs
+        is_power_graph = graph_choice == "Received Power vs. Tx Power"
+        self.tx_power_min_label.config(state='normal' if is_power_graph else 'disabled')
+        self.tx_power_min_entry.config(state='normal' if is_power_graph else 'disabled')
+        self.tx_power_max_label.config(state='normal' if is_power_graph else 'disabled')
+        self.tx_power_max_entry.config(state='normal' if is_power_graph else 'disabled')
+
         if graph_choice in ["SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)", "SKR vs. QBER", "Received Power vs. Tx Power"]:
              self.range_label.config(text="Fixed Range (km):")
         else:
@@ -116,22 +135,18 @@ class SimulationGUI:
             if 'y2' in kwargs:
                 self.ax.plot(x_data, kwargs['y2'], 's--', label=kwargs.get('label2'))
                 self.ax.legend()
-
         self.ax.set_title(title); self.ax.set_xlabel(xlabel); self.ax.set_ylabel(ylabel)
         self.ax.grid(True)
-        
         if yscale == 'log' and y_data and any(y > 0 for y in y_data):
             self.ax.set_yscale('log')
         else:
             self.ax.set_yscale('linear')
-            
         self.fig.tight_layout()
         self.canvas.draw()
 
     def run_simulation(self):
         self.status_label.config(text="Status: Running..."); self.master.update_idletasks()
 
-        # Get all parameters from UI
         protocol_choice = self.protocol_type.get()
         link_type = self.link_type.get()
         range_param = float(self.range_entry.get())
@@ -141,52 +156,60 @@ class SimulationGUI:
 
         protocol = DecoyBB84Protocol() if protocol_choice == "Decoy-State BB84" else MDIQKDProtocol()
         
-        # --- Main Dispatcher for Different Graph Types ---
-        # This block handles all graphs that iterate over a range of distances
-        if graph_choice in ["SKR vs. Range", "Total Loss vs. Range", "QBER vs. Range", "QBER vs. Total Loss", "Key Rate Components vs. Range"]:
-            ranges_km = np.linspace(max(100, range_param/10), range_param, 30)
-            results = {'loss': [], 'qber': [], 'skr': [], 'useful': [], 'leakage': []}
-
-            for r in ranges_km:
-                channel = InterSatelliteLink(range_km=r, divergence_mrad=divergence, pointing_error_urad=float(self.pointing_entry.get())) if link_type == 'ISL' else \
-                          GroundToSatelliteLink(range_km=r, divergence_mrad=divergence, turbulence_strength=self.turbulence_combo.get())
-                props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
-                res = protocol.calculate_skr(props)
-                results['loss'].append(props['total_loss_db']); results['qber'].append(props['effective_qber'])
-                results['skr'].append(res['skr']); results['useful'].append(res['useful_rate']); results['leakage'].append(res['leakage_rate'])
-
-            # --- RESTORED PLOTTING LOGIC FOR ALL "VS. RANGE" GRAPHS ---
-            if graph_choice == "SKR vs. Range":
-                self.update_plot(ranges_km, results['skr'], f"{protocol_choice} on {link_type}", "Range (km)", "SKR (bits/pulse)", yscale='log')
-                self.status_label.config(text=f"Status: Complete. Final SKR at {range_param} km: {results['skr'][-1]:.2e} bits/pulse")
-            
-            elif graph_choice == "Total Loss vs. Range":
-                self.update_plot(ranges_km, results['loss'], f"{link_type} Performance", "Range (km)", "Total Loss (dB)")
-                self.status_label.config(text=f"Status: Complete. Final Loss at {range_param} km: {results['loss'][-1]:.2f} dB")
-            
-            elif graph_choice == "QBER vs. Range":
-                self.update_plot(ranges_km, results['qber'], f"{link_type} Performance", "Range (km)", "Effective QBER", yscale='linear')
-                self.status_label.config(text=f"Status: Complete. Final QBER at {range_param} km: {results['qber'][-1]:.2%}")
-            
-            elif graph_choice == "QBER vs. Total Loss":
-                self.update_plot(results['loss'], results['qber'], f"{link_type} Performance", "Total Loss (dB)", "Effective QBER")
-                self.status_label.config(text=f"Status: Complete. Final QBER: {results['qber'][-1]:.2%}")
-
-            elif graph_choice == "Key Rate Components vs. Range":
-                self.update_plot(ranges_km, results['useful'], f"{protocol_choice} Components on {link_type}", "Range (km)", "Rate (bits/pulse)", yscale='log', 
-                                 y2=results['leakage'], label1='Useful Rate', label2='Leakage Rate')
-                self.status_label.config(text=f"Status: Complete. Analysis of key rate components.")
-
-        # This block handles graphs where range is fixed
-        elif graph_choice == "Received Power vs. Tx Power":
+        if graph_choice == "Received Power vs. Tx Power":
             channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, pointing_error_urad=float(self.pointing_entry.get())) if link_type == 'ISL' else \
                       GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, turbulence_strength=self.turbulence_combo.get())
             props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
             total_loss_db = props['total_loss_db']
-            tx_powers_dbm = np.linspace(-20, 10, 30)
+            
+            # --- USE VALUES FROM NEW UI WIDGETS ---
+            min_tx = float(self.tx_power_min_entry.get())
+            max_tx = float(self.tx_power_max_entry.get())
+            tx_powers_dbm = np.linspace(min_tx, max_tx, 30)
+            
             rx_powers_dbm = tx_powers_dbm - total_loss_db
+            
             self.update_plot(tx_powers_dbm, rx_powers_dbm, f"{link_type} Link Budget at {range_param} km", "Transmitted Power (dBm)", "Received Power (dBm)")
             self.status_label.config(text=f"Status: Complete. Total link loss: {total_loss_db:.2f} dB")
+            return
+
+        # --- The rest of the function remains the same ---
+        # It correctly handles all the other graph types.
+        # ... (full logic from previous response)
+        ranges_km = np.linspace(max(100, range_param/10), range_param, 30)
+        results = {'loss': [], 'qber': [], 'skr': [], 'useful': [], 'leakage': []}
+
+        for r in ranges_km:
+            if link_type == 'ISL':
+                channel = InterSatelliteLink(range_km=r, divergence_mrad=divergence, pointing_error_urad=float(self.pointing_entry.get()))
+            else:
+                channel = GroundToSatelliteLink(range_km=r, divergence_mrad=divergence, turbulence_strength=self.turbulence_combo.get())
+            
+            props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
+            res = protocol.calculate_skr(props)
+            results['loss'].append(props['total_loss_db']); results['qber'].append(props['effective_qber'])
+            results['skr'].append(res['skr']); results['useful'].append(res['useful_rate']); results['leakage'].append(res['leakage_rate'])
+
+        if graph_choice == "SKR vs. Range":
+            self.update_plot(ranges_km, results['skr'], f"{protocol_choice} on {link_type}", "Range (km)", "SKR (bits/pulse)", yscale='log')
+            self.status_label.config(text=f"Status: Complete. Final SKR at {range_param} km: {results['skr'][-1]:.2e} bits/pulse")
+        
+        elif graph_choice == "Total Loss vs. Range":
+            self.update_plot(ranges_km, results['loss'], f"{link_type} Performance", "Range (km)", "Total Loss (dB)")
+            self.status_label.config(text=f"Status: Complete. Final Loss at {range_param} km: {results['loss'][-1]:.2f} dB")
+        
+        elif graph_choice == "QBER vs. Range":
+            self.update_plot(ranges_km, results['qber'], f"{link_type} Performance", "Range (km)", "Effective QBER", yscale='linear')
+            self.status_label.config(text=f"Status: Complete. Final QBER at {range_param} km: {results['qber'][-1]:.2%}")
+            
+        elif graph_choice == "QBER vs. Total Loss":
+            self.update_plot(results['loss'], results['qber'], f"{link_type} Performance", "Total Loss (dB)", "Effective QBER")
+            self.status_label.config(text=f"Status: Complete. Final QBER: {results['qber'][-1]:.2%}")
+
+        elif graph_choice == "Key Rate Components vs. Range":
+            self.update_plot(ranges_km, results['useful'], f"{protocol_choice} Components on {link_type}", "Range (km)", "Rate (bits/pulse)", yscale='log', 
+                             y2=results['leakage'], label1='Useful Rate', label2='Leakage Rate')
+            self.status_label.config(text=f"Status: Complete. Analysis of key rate components.")
 
         elif graph_choice == "SKR vs. Pointing Error (ISL)":
             pointing_errors = np.linspace(0.5, 5.0, 30)
@@ -213,15 +236,14 @@ class SimulationGUI:
             skr_results = []
             channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, pointing_error_urad=float(self.pointing_entry.get())) if link_type == 'ISL' else \
                       GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, turbulence_strength=self.turbulence_combo.get())
-            # Get fixed loss from the channel, but ignore its QBER calculation
             base_props = channel.get_channel_properties(intrinsic_qber=0) 
             
             for qber in qber_values:
-                # Manually create the properties dictionary for each QBER value
                 current_props = {'total_loss_db': base_props['total_loss_db'], 'effective_qber': qber}
                 skr_results.append(protocol.calculate_skr(current_props)['skr'])
             self.update_plot(qber_values * 100, skr_results, f"{protocol_choice} at {range_param}km", "Total Effective QBER (%)", "SKR (bits/pulse)", yscale='log')
             self.status_label.config(text=f"Status: Complete. Analysis of error tolerance.")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
