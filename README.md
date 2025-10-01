@@ -26,6 +26,7 @@ This simulator models both atmospheric ground-to-satellite (GTS) links and vacuu
 
 The project is organized in a modular and scalable structure.
 
+```
 QKD_Satellite_Simulation/
 │
 ├── gui.py # Main script to launch the UI.
@@ -42,6 +43,7 @@ QKD_Satellite_Simulation/
 └── results/ # Directory to save outputs (optional).
 ├── plots/
 └── data/
+```
 
 ---
 
@@ -93,9 +95,9 @@ To run the simulation and launch the graphical interface, execute the `gui.py` s
 python gui.py
 ```
 
-**⚙️ Simulation Parameters Explained**
+## ⚙️ Simulation Parameters Explained
 
-The GUI allows you to control the following parameters:
+**The GUI allows you to control the following parameters:**
 
 Protocol: Choose between Decoy-State BB84 and MDI-QKD. MDI-QKD offers higher security against detector attacks but its key rate scales quadratically with loss ($O(\eta^2)$), while BB84 scales linearly ($O(\eta)$).
 
