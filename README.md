@@ -91,7 +91,7 @@ To run the simulation and launch the graphical interface, execute the `gui.py` s
 
 ```bash
 python gui.py
-
+```
 
 **⚙️ Simulation Parameters Explained**
 
@@ -116,4 +116,7 @@ Turbulence: ('low', 'medium', 'high') Simulates the effect of atmospheric distor
 Pointing Error (µrad): Simulates the pointing jitter for ISLs.
 
 Intrinsic QBER (%): The baseline error rate from hardware imperfections, independent of the channel.
+
+```
+
 ```
