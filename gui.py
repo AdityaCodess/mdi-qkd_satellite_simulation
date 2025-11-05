@@ -7,7 +7,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # Import the simulation backend
 from qkd_simulation.channels import GroundToSatelliteLink, InterSatelliteLink
-from qkd_simulation.protocol import DecoyBB84Protocol, MDIQKDProtocol
+# Import all three protocol classes
+from qkd_simulation.protocol import DecoyBB84Protocol, MDIQKDProtocol, ClassicalProtocol
 
 class SimulationGUI:
     def __init__(self, master):
@@ -27,23 +28,25 @@ class SimulationGUI:
 
         ttk.Separator(input_frame, orient='horizontal').grid(row=2, column=0, sticky='ew', pady=5)
 
-        # --- Protocol Selection --- (Row 3, 4)
+        # --- Protocol Selection (UPDATED) --- (Row 3, 4)
         ttk.Label(input_frame, text="Protocol:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
         self.protocol_type = tk.StringVar(value="Decoy-State BB84")
-        protocol_options = ["Decoy-State BB84", "MDI-QKD"]
+        # Add new option to the list
+        protocol_options = ["Decoy-State BB84", "MDI-QKD", "Classical (Normal Channel)"]
         self.protocol_combo = ttk.Combobox(input_frame, textvariable=self.protocol_type, values=protocol_options, state="readonly")
         self.protocol_combo.grid(row=4, column=0, padx=5, pady=2, sticky="ew")
 
         ttk.Separator(input_frame, orient='horizontal').grid(row=5, column=0, sticky='ew', pady=5)
 
-        # --- Graph Type Selection --- (Row 6, 7)
+        # --- Graph Type Selection (UPDATED) --- (Row 6, 7)
         ttk.Label(input_frame, text="Graph Type:").grid(row=6, column=0, sticky="w", padx=5, pady=2)
         self.graph_type = tk.StringVar(value="SKR vs. Range")
         graph_options = [
             "SKR vs. Range", "Channel Loss vs. Range", "QBER vs. Range",
             "Received Power vs. Tx Power", "QBER vs. Channel Loss",
             "SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)",
-            "SKR vs. QBER", "Key Rate Components vs. Range"
+            "SKR vs. QBER", "Key Rate Components vs. Range",
+            "QBER vs. Eve's Attack" # <-- NEW GRAPH
         ]
         self.graph_combo = ttk.Combobox(input_frame, textvariable=self.graph_type, values=graph_options, state="readonly")
         self.graph_combo.grid(row=7, column=0, padx=5, pady=2, sticky="ew")
@@ -63,7 +66,7 @@ class SimulationGUI:
         self.range_entry = ttk.Entry(input_frame); self.range_entry.grid(row=13, column=0, padx=5, pady=2); self.range_entry.insert(0, "500")
 
         ttk.Label(input_frame, text="Divergence (mrad):").grid(row=14, column=0, sticky="w", padx=5, pady=2)
-        self.divergence_entry = ttk.Entry(input_frame); self.divergence_entry.grid(row=15, column=0, padx=5, pady=2); self.divergence_entry.insert(0, "0.025")
+        self.divergence_entry = ttk.Entry(input_frame); self.divergence_entry.grid(row=15, column=0, padx=5, pady=2); self.divergence_entry.insert(0, "0.032")
 
         self.turbulence_label = ttk.Label(input_frame, text="Turbulence:")
         self.turbulence_label.grid(row=16, column=0, sticky="w", padx=5, pady=2)
@@ -123,6 +126,7 @@ class SimulationGUI:
         self.toggle_inputs()
 
     def toggle_inputs(self, event=None):
+        # (This function is updated to handle the new graph)
         is_isl = self.link_type.get() == "ISL"
         graph_choice = self.graph_type.get()
         self.turbulence_label.config(state='disabled' if is_isl else 'normal')
@@ -136,7 +140,9 @@ class SimulationGUI:
         self.tx_power_min_entry.config(state='normal' if is_power_graph else 'disabled')
         self.tx_power_max_label.config(state='normal' if is_power_graph else 'disabled')
         self.tx_power_max_entry.config(state='normal' if is_power_graph else 'disabled')
-        if graph_choice in ["SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)", "SKR vs. QBER", "Received Power vs. Tx Power"]:
+        
+        # All these graphs require a fixed range
+        if graph_choice in ["SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)", "SKR vs. QBER", "Received Power vs. Tx Power", "QBER vs. Eve's Attack"]:
              self.range_label.config(text="Fixed Range (km):")
         else:
              self.range_label.config(text="Max Range (km):")
@@ -147,18 +153,17 @@ class SimulationGUI:
                      isinstance(y_data, (list, np.ndarray)) and \
                      len(x_data) > 0 and len(x_data) == len(y_data)
         
-        # --- THIS IS THE FIX ---
-        is_bar = kwargs.get('is_bar', False) # Check if it's a bar chart
+        is_bar = kwargs.get('is_bar', False)
 
         if not valid_data:
             self.ax.text(0.5, 0.5, 'No valid data to plot', ha='center', va='center', transform=self.ax.transAxes)
-            full_x_range = False
+            full_x_range_valid = False
         else:
-            full_x_range = True
-            # Only calculate min/max if it's NOT a bar chart
+            full_x_range_valid = True
             if not is_bar:
-                min_x, max_x = min(x_data), max(x_data)
-
+                try: min_x, max_x = min(x_data), max(x_data)
+                except TypeError: full_x_range_valid = False
+            
             if is_bar:
                  bar_labels = [str(x) for x in x_data]
                  self.ax.bar(bar_labels, y_data)
@@ -172,64 +177,44 @@ class SimulationGUI:
         self.ax.set_title(title); self.ax.set_xlabel(xlabel); self.ax.set_ylabel(ylabel)
         self.ax.grid(True)
 
-        # 1. Set X-axis limits (ONLY IF NOT A BAR CHART)
-        if full_x_range and not is_bar:
-            try:
-                padding = (max_x - min_x) * 0.02 if max_x > min_x else 1
-                self.ax.set_xlim(min_x - padding, max_x + padding)
-            except TypeError:
-                pass # Fail silently if min/max are somehow non-numeric
+        if full_x_range_valid and not is_bar:
+            padding = (max_x - min_x) * 0.02 if max_x > min_x else 1
+            self.ax.set_xlim(min_x - padding, max_x + padding)
 
-        # 2. Try setting Y-scale
         try:
             has_positive_y = any(y > 0 for y in y_data) if valid_data else False
             if yscale == 'log' and has_positive_y:
-                # Filter for log scale
                 if is_bar:
-                    # For bar charts, just set log scale, don't filter
                     self.ax.set_yscale('log')
                 elif valid_data:
-                     # Filter non-positive data for line plots
                      filtered_data = [(x, y) for x, y in zip(x_data, y_data) if y > 0]
                      if filtered_data:
                          x_filt, y_filt_main = zip(*filtered_data)
                          self.ax.clear()
                          self.ax.plot(x_filt, y_filt_main, 'o-', label=kwargs.get('label1'))
-                         
                          if 'y2' in kwargs:
-                             y2_data = kwargs['y2']
+                             y2_data = kwargs.get('y2')
                              if isinstance(y2_data, (list, np.ndarray)) and len(y2_data) == len(x_data):
-                                 # Filter y2 based on y1 being positive
-                                 y2_filt_pairs = [(x, y2) for x, y, y2 in zip(x_data, y_data, y2_data) if y > 0 and y2 > 0] # Also check y2 > 0
+                                 y2_filt_pairs = [(x, y2) for x, y, y2 in zip(x_data, y_data, y2_data) if y > 0 and y2 > 0]
                                  if y2_filt_pairs:
                                      x_filt_y2, y2_filt = zip(*y2_filt_pairs)
                                      self.ax.plot(x_filt_y2, y2_filt, 's--', label=kwargs.get('label2'))
-                         
-                         if kwargs.get('label1') or kwargs.get('label2'):
-                             self.ax.legend()
+                         if kwargs.get('label1') or kwargs.get('label2'): self.ax.legend()
                          self.ax.set_yscale('log')
-                         # Re-apply labels, grid, and title after clearing
                          self.ax.set_title(title); self.ax.set_xlabel(xlabel); self.ax.set_ylabel(ylabel); self.ax.grid(True)
-                         # Re-apply original x-limits
                          padding = (max_x - min_x) * 0.02 if max_x > min_x else 1
                          self.ax.set_xlim(min_x - padding, max_x + padding)
-                     else:
-                         self.ax.set_yscale('linear') # Fallback if filtering leaves no data
-                else:
-                    self.ax.set_yscale('linear') # Fallback if no positive data
-            else:
-                 self.ax.set_yscale('linear')
-        except (ValueError, TypeError):
-             self.ax.set_yscale('linear')
+                     else: self.ax.set_yscale('linear')
+                else: self.ax.set_yscale('linear')
+            else: self.ax.set_yscale('linear')
+        except (ValueError, TypeError): self.ax.set_yscale('linear')
 
-        self.fig.tight_layout()
-        self.canvas.draw()
+        self.fig.tight_layout(); self.canvas.draw()
         
-    # --- run_simulation function remains unchanged from the previous version ---
     def run_simulation(self):
         self.status_label.config(text="Status: Running..."); self.master.update_idletasks()
 
-        try: # Read all inputs
+        try:
             protocol_choice = self.protocol_type.get()
             link_type = self.link_type.get()
             range_param = float(self.range_entry.get())
@@ -242,15 +227,25 @@ class SimulationGUI:
             turbulence_choice = self.turbulence_combo.get()
             detector_efficiency = float(self.det_eff_entry.get()) / 100.0
             receiver_optics_loss_db = float(self.rx_loss_entry.get())
-
         except ValueError:
             self.status_label.config(text="Status: Error - Invalid numerical input.")
             self.update_plot([], [], "Error", "Invalid Input", "")
             return
 
-        protocol = DecoyBB84Protocol() if protocol_choice == "Decoy-State BB84" else MDIQKDProtocol()
-        
+        # --- DYNAMIC PROTOCOL SELECTION (UPDATED) ---
+        if protocol_choice == "Decoy-State BB84":
+            protocol = DecoyBB84Protocol()
+        elif protocol_choice == "MDI-QKD":
+            protocol = MDIQKDProtocol()
+        elif protocol_choice == "Classical (Normal Channel)":
+            protocol = ClassicalProtocol()
+        else:
+            self.status_label.config(text="Status: Error - Unknown protocol.")
+            return
+
         # --- Main Dispatcher Logic ---
+        
+        # Graphs vs. a primary variable (Range)
         if graph_choice in ["SKR vs. Range", "Channel Loss vs. Range", "QBER vs. Range", "QBER vs. Channel Loss", "Key Rate Components vs. Range"]:
             start_range_km = max(10, range_param / 10)
             ranges_km = np.linspace(start_range_km, range_param, 30)
@@ -271,8 +266,8 @@ class SimulationGUI:
                     results['skr'].append(res['skr']); results['useful'].append(res['useful_rate']); results['leakage'].append(res['leakage_rate'])
                 except Exception as e:
                     self.status_label.config(text=f"Status: Error - {e}"); valid_run = False; break
-            
             if valid_run:
+                # Plotting logic for "vs. Range" graphs
                 if graph_choice == "SKR vs. Range":
                     self.update_plot(ranges_km, results['skr'], f"{protocol_choice} on {link_type}", "Range (km)", "SKR (bits/pulse)", yscale='log')
                     self.status_label.config(text=f"Status: Complete. Final SKR @ {range_param} km: {results['skr'][-1]:.2e} bits/pulse")
@@ -287,17 +282,17 @@ class SimulationGUI:
                     qber_percent = [q*100 for q in results['qber']]
                     valid_losses = [l for l in results['loss'] if np.isfinite(l)]
                     valid_qbers = [q for i, q in enumerate(qber_percent) if np.isfinite(results['loss'][i])]
-                    if len(valid_losses) > 0:
+                    if len(valid_losses) > 0 and len(valid_losses) == len(valid_qbers):
                         self.update_plot(valid_losses, valid_qbers, f"{link_type} Performance", "Channel Loss (dB)", "Effective QBER (%)", yscale='linear')
                         self.status_label.config(text=f"Status: Complete. Final QBER: {results['qber'][-1]:.2%}")
                     else:
-                        self.update_plot([], [], f"{link_type} Performance", "Channel Loss (dB)", "Effective QBER (%)")
-                        self.status_label.config(text=f"Status: Complete. No valid loss data.")
+                        self.update_plot([], [], f"{link_type} Performance", "Channel Loss (dB)", "Effective QBER (%)", status="No valid loss data.")
                 elif graph_choice == "Key Rate Components vs. Range":
                     self.update_plot(ranges_km, results['useful'], f"{protocol_choice} Components on {link_type}", "Range (km)", "Rate (bits/pulse)", yscale='log',
                                      y2=results['leakage'], label1='Useful Rate', label2='Leakage Rate')
                     self.status_label.config(text=f"Status: Complete. Key component analysis.")
-
+        
+        # Graphs where range is fixed
         elif graph_choice == "Received Power vs. Tx Power":
             try:
                 if link_type == 'ISL':
@@ -306,7 +301,6 @@ class SimulationGUI:
                 else:
                     channel = GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, turbulence_strength=turbulence_choice)
                     props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber, qber_rytor_scaling=qber_scaling_factor)
-
                 if not np.isfinite(props['channel_loss_db']): raise ValueError("Channel loss calc failed")
                 total_system_loss_db = props['channel_loss_db'] + receiver_optics_loss_db + (-10*np.log10(detector_efficiency) if detector_efficiency > 0 else np.inf)
                 min_tx = float(self.tx_power_min_entry.get()); max_tx = float(self.tx_power_max_entry.get())
@@ -361,6 +355,44 @@ class SimulationGUI:
             if valid_run:
                 self.update_plot(qber_values * 100, skr_results, f"{protocol_choice} @ {range_param}km ({base_channel_loss:.1f} dB Channel Loss)", "Total Effective QBER (%)", "SKR (bits/pulse)", yscale='log')
                 self.status_label.config(text=f"Status: Complete. Error tolerance analysis.")
+
+        # --- NEW GRAPH LOGIC ---
+        elif graph_choice == "QBER vs. Eve's Attack":
+            try:
+                # 1. Get the base channel QBER (no attack)
+                if link_type == 'ISL':
+                    channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, pointing_error_urad=pointing_error_val)
+                    base_props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
+                else:
+                    channel = GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, turbulence_strength=turbulence_choice)
+                    base_props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber, qber_rytor_scaling=qber_scaling_factor)
+                
+                base_qber = base_props['effective_qber']
+                if not np.isfinite(base_qber): raise ValueError("Base QBER calc failed")
+
+                # 2. Create X-axis (attack intensity)
+                x_attack_levels = np.linspace(0, 1, 30) # 0% to 100% attack
+                
+                # 3. Calculate QBER for QKD
+                # Eve introduces 25% QBER on the fraction of the signal she attacks
+                qkd_qber = (1 - x_attack_levels) * base_qber + (x_attack_levels * 0.25)
+                
+                # 4. Calculate QBER for Classical
+                # QBER is unchanged, Eve's attack is undetectable
+                classical_qber = np.full_like(x_attack_levels, base_qber)
+                
+                # 5. Plot both lines
+                self.update_plot(x_attack_levels * 100, qkd_qber * 100, 
+                                 f"QKD vs Classical: Eavesdropping Detection ({link_type} @ {range_param}km)", 
+                                 "Eavesdropping Attack Intensity (%)", 
+                                 "Measured QBER (%)", 
+                                 yscale='linear',
+                                 y2=classical_qber * 100, 
+                                 label1="QKD (BB84/MDI)", 
+                                 label2="Classical Channel")
+                self.status_label.config(text=f"Status: Complete. QKD shows detectable error increase.")
+            except Exception as e:
+                self.status_label.config(text=f"Status: Error - {e}"); self.update_plot([], [], "Error", "Calculation Error", "")
 
 
 if __name__ == "__main__":
