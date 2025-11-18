@@ -2,9 +2,9 @@
 import numpy as np
 import math
 try:
-    from . import parameters as p # Relative import
+    from . import parameters as p 
 except ImportError:
-    import parameters as p # Absolute import
+    import parameters as p 
 
 def binary_entropy(p_err):
     """Calculates the binary Shannon entropy H(p)."""
@@ -26,7 +26,7 @@ def poisson(mu, n):
     except (ValueError, OverflowError):
         return 0.0
 
-# --- NEW PROTOCOL CLASS ---
+# Classical Protocol
 class ClassicalProtocol:
     """
     Represents a normal (classical) channel.

@@ -1,6 +1,3 @@
-# qkd_simulation/parameters.py
-
-# --- Physical Constants ---
 C = 299792458  # Speed of light in m/s
 H = 6.62607015e-34 # Planck's constant in J*s
 
@@ -17,7 +14,7 @@ DARK_COUNT_RATE = 500     # Dark counts per second
 DETECTOR_DEAD_TIME = 50e-9  # Typical dead time
 
 # --- Protocol Parameters ---
-REPETITION_RATE = 1e8     # System pulse rate in Hz (Micius uses 100 MHz)
+REPETITION_RATE = 1e8     # System pulse rate in Hz 
 DECOY_INTENSITIES = {
     'signal': 0.5, 'decoy': 0.1, 'vacuum': 0.0
 }

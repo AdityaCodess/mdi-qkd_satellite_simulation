@@ -4,10 +4,7 @@ from tkinter import ttk
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-# Import the simulation backend
 from qkd_simulation.channels import GroundToSatelliteLink, InterSatelliteLink
-# Import all three protocol classes
 from qkd_simulation.protocol import DecoyBB84Protocol, MDIQKDProtocol, ClassicalProtocol
 
 class SimulationGUI:
@@ -18,27 +15,22 @@ class SimulationGUI:
         self.create_widgets()
 
     def create_widgets(self):
-        # --- Input Frame ---
         input_frame = ttk.LabelFrame(self.master, text="Input Parameters")
         input_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ns")
 
-        # --- Wavelength Input --- (Row 0, 1)
         ttk.Label(input_frame, text="Wavelength (nm):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.wavelength_entry = ttk.Entry(input_frame); self.wavelength_entry.grid(row=1, column=0, padx=5, pady=2, sticky="ew"); self.wavelength_entry.insert(0, "850")
 
         ttk.Separator(input_frame, orient='horizontal').grid(row=2, column=0, sticky='ew', pady=5)
-
-        # --- Protocol Selection (UPDATED) --- (Row 3, 4)
         ttk.Label(input_frame, text="Protocol:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
         self.protocol_type = tk.StringVar(value="Decoy-State BB84")
-        # Add new option to the list
+
         protocol_options = ["Decoy-State BB84", "MDI-QKD", "Classical (Normal Channel)"]
         self.protocol_combo = ttk.Combobox(input_frame, textvariable=self.protocol_type, values=protocol_options, state="readonly")
         self.protocol_combo.grid(row=4, column=0, padx=5, pady=2, sticky="ew")
 
         ttk.Separator(input_frame, orient='horizontal').grid(row=5, column=0, sticky='ew', pady=5)
 
-        # --- Graph Type Selection (UPDATED) --- (Row 6, 7)
         ttk.Label(input_frame, text="Graph Type:").grid(row=6, column=0, sticky="w", padx=5, pady=2)
         self.graph_type = tk.StringVar(value="SKR vs. Range")
         graph_options = [
@@ -46,7 +38,7 @@ class SimulationGUI:
             "Received Power vs. Tx Power", "QBER vs. Channel Loss",
             "SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)",
             "SKR vs. QBER", "Key Rate Components vs. Range",
-            "QBER vs. Eve's Attack" # <-- NEW GRAPH
+            "QBER vs. Eve's Attack" 
         ]
         self.graph_combo = ttk.Combobox(input_frame, textvariable=self.graph_type, values=graph_options, state="readonly")
         self.graph_combo.grid(row=7, column=0, padx=5, pady=2, sticky="ew")
@@ -54,13 +46,13 @@ class SimulationGUI:
 
         ttk.Separator(input_frame, orient='horizontal').grid(row=8, column=0, sticky='ew', pady=5)
 
-        # --- Link Type Selection --- (Row 9, 10, 11)
+        
         self.link_type = tk.StringVar(value="ISL")
         ttk.Label(input_frame, text="Link Type:").grid(row=9, column=0, sticky="w", padx=5, pady=2)
         ttk.Radiobutton(input_frame, text="Inter-Satellite (ISL)", variable=self.link_type, value="ISL", command=self.toggle_inputs).grid(row=10, column=0, sticky="w", padx=10)
         ttk.Radiobutton(input_frame, text="Ground-to-Satellite", variable=self.link_type, value="GTS", command=self.toggle_inputs).grid(row=11, column=0, sticky="w", padx=10)
 
-        # --- Numerical Inputs (Channel) --- (Row 12 onwards)
+        
         self.range_label = ttk.Label(input_frame, text="Range Parameter (km):")
         self.range_label.grid(row=12, column=0, sticky="w", padx=5, pady=2)
         self.range_entry = ttk.Entry(input_frame); self.range_entry.grid(row=13, column=0, padx=5, pady=2); self.range_entry.insert(0, "500")
@@ -85,7 +77,7 @@ class SimulationGUI:
         self.qber_scale_entry = ttk.Entry(input_frame);
         self.qber_scale_entry.grid(row=23, column=0, padx=5, pady=2); self.qber_scale_entry.insert(0, "0.1")
 
-        # --- Hardware Inputs --- (Row 24 onwards)
+        
         ttk.Separator(input_frame, orient='horizontal').grid(row=24, column=0, sticky='ew', pady=5)
 
         ttk.Label(input_frame, text="Detector Efficiency (%):").grid(row=25, column=0, sticky="w", padx=5, pady=2)
@@ -96,7 +88,7 @@ class SimulationGUI:
         self.rx_loss_entry = ttk.Entry(input_frame)
         self.rx_loss_entry.grid(row=28, column=0, padx=5, pady=2); self.rx_loss_entry.insert(0, "3.0")
 
-        # --- Tx Power Widgets (Renumbered) ---
+       
         self.tx_power_min_label = ttk.Label(input_frame, text="Min Tx Power (dBm):")
         self.tx_power_min_label.grid(row=29, column=0, sticky="w", padx=5, pady=2)
         self.tx_power_min_entry = ttk.Entry(input_frame)
@@ -126,7 +118,6 @@ class SimulationGUI:
         self.toggle_inputs()
 
     def toggle_inputs(self, event=None):
-        # (This function is updated to handle the new graph)
         is_isl = self.link_type.get() == "ISL"
         graph_choice = self.graph_type.get()
         self.turbulence_label.config(state='disabled' if is_isl else 'normal')
@@ -141,7 +132,6 @@ class SimulationGUI:
         self.tx_power_max_label.config(state='normal' if is_power_graph else 'disabled')
         self.tx_power_max_entry.config(state='normal' if is_power_graph else 'disabled')
         
-        # All these graphs require a fixed range
         if graph_choice in ["SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)", "SKR vs. QBER", "Received Power vs. Tx Power", "QBER vs. Eve's Attack"]:
              self.range_label.config(text="Fixed Range (km):")
         else:
@@ -356,7 +346,7 @@ class SimulationGUI:
                 self.update_plot(qber_values * 100, skr_results, f"{protocol_choice} @ {range_param}km ({base_channel_loss:.1f} dB Channel Loss)", "Total Effective QBER (%)", "SKR (bits/pulse)", yscale='log')
                 self.status_label.config(text=f"Status: Complete. Error tolerance analysis.")
 
-        # --- NEW GRAPH LOGIC ---
+        # --- QBER VS EVE ---
         elif graph_choice == "QBER vs. Eve's Attack":
             try:
                 # 1. Get the base channel QBER (no attack)

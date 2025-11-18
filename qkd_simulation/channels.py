@@ -1,10 +1,9 @@
-# qkd_simulation/channels.py
 import numpy as np
 from scipy.integrate import quad
 try:
-    from . import parameters as p # Relative import
+    from . import parameters as p 
 except ImportError:
-    import parameters as p # Absolute import for direct run
+    import parameters as p 
 
 # --- Atmospheric Extinction Coefficient Model ---
 def extinction_coefficient(h_meters, wavelength_m):
@@ -46,7 +45,6 @@ def extinction_coefficient(h_meters, wavelength_m):
 
 
 # --- Hufnagel-Valley C_n^2 Model ---
-# (hufnagel_valley function remains the same)
 def hufnagel_valley(h_meters, A, v_wind_ms):
     if h_meters < 0: h_meters = 0
     try:
