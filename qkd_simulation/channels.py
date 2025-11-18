@@ -209,7 +209,6 @@ class GroundToSatelliteLink(BaseChannel):
              sigma_TB_sq_safe = max(0, sigma_TB_sq)
              beam_wander_loss_db = 4.34 * (sigma_TB_sq_safe / (w_st_diameter/2)**2)
 
-        # Use the new atmospheric loss calculation
         atmospheric_loss_db = self.calculate_atmospheric_loss_db(zenith_angle)
 
         channel_loss_db = geometric_loss_db + atmospheric_loss_db + beam_wander_loss_db
