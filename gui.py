@@ -1,391 +1,328 @@
-# gui.py
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
+import math
+from scipy.integrate import quad
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from qkd_simulation.channels import GroundToSatelliteLink, InterSatelliteLink
-from qkd_simulation.protocol import DecoyBB84Protocol, MDIQKDProtocol, ClassicalProtocol
+
+# =============================================================================
+# PHYSICS ENGINE
+# =============================================================================
+
+R_EARTH = 6371e3
+H_ATMOS = 20000
+
+def hufnagel_valley(h, A, v):
+    if h < 0: h = 0
+    try:
+        t1 = 5.94e-53 * (v / 27)**2 * (h**10) * np.exp(-h / 1000)
+        t2 = 2.7e-16 * np.exp(-h / 1500)
+        t3 = A * np.exp(-h / 100)
+        return t1 + t2 + t3
+    except: return 0.0
+
+def extinction_coefficient(h, wavelength_m):
+    V_km = 23.0 
+    lnm = wavelength_m * 1e9
+    q = 1.6 if V_km > 50 else 1.3 if V_km > 6 else 0.16 * V_km + 0.34
+    beta = (3.912 / V_km) * (lnm / 550.0)**(-q)
+    return (beta / 1000.0) * np.exp(-h / 1200) + 1e-6
+
+class QuantumLink:
+    def __init__(self, cfg):
+        self.alt_m = cfg['alt_km'] * 1000
+        # Distance cannot be less than altitude for GTS
+        self.z = max(cfg['range_km'] * 1000, self.alt_m) if cfg['link_type'] == "GTS" else cfg['range_km'] * 1000
+        self.lam = cfg['wavelength_nm'] * 1e-9
+        self.div = cfg['divergence_mrad'] * 1e-3
+        self.dtx = cfg['tx_aperture']
+        self.drx = cfg['rx_aperture']
+        self.link = cfg['link_type']
+        self.turb = cfg.get('turb_lvl', 'low')
+        self.pe = cfg.get('pointing_error', 1.0)
+        self.w0 = self.lam / (np.pi * self.div) if self.div > 0 else self.dtx/2
+
+    def get_properties(self):
+        if self.link == 'ISL':
+            zR = np.pi * self.w0**2 / self.lam
+            wd = 2 * self.w0 * np.sqrt(1 + (self.z/zR)**2)
+            geo = -10 * np.log10(np.clip((self.drx/wd)**2, 1e-20, 1.0))
+            pointing = 4.34 * ((self.pe * 1e-6 * self.z) / (wd/2))**2
+            return {'loss': geo + pointing, 'turb_qber': 0.0}
+        else:
+            cos_th = self.alt_m/self.z + (self.alt_m**2 - self.z**2)/(2*self.z*R_EARTH)
+            th = np.arccos(np.clip(cos_th, -1.0, 1.0))
+            k = 2 * np.pi / self.lam
+            tp = {'low': (1.7e-14, 21), 'medium': (2.75e-14, 21), 'high': (2.75e-14, 57)}[self.turb]
+            
+            def rho_int(xi):
+                h = np.sqrt(R_EARTH**2 + xi**2 + 2*xi*R_EARTH*np.cos(th)) - R_EARTH
+                return (1 - xi/self.z)**(5/3) * hufnagel_valley(h, *tp)
+            i0, _ = quad(rho_int, 0, self.z)
+            rho0 = (1.46 * k**2 * i0)**(-3/5) if i0 > 0 else 1e9
+            
+            def ry_int(xi):
+                h = np.sqrt(R_EARTH**2 + xi**2 + 2*xi*R_EARTH*np.cos(th)) - R_EARTH
+                return (xi/self.z * (1 - xi/self.z))**(5/6) * hufnagel_valley(h, *tp)
+            ry, _ = quad(ry_int, 0, self.z)
+            sigR2 = 2.25 * k**(7/6) * ry
+            
+            wd = 2 * self.w0 * np.sqrt(1 + (self.z/(np.pi*self.w0**2/self.lam))**2)
+            wst = np.sqrt(wd**2 + 2*(self.z/(k*rho0))**2) if rho0 > 0 else wd
+            geo = -10 * np.log10(np.clip((self.drx/wst)**2, 1e-20, 1.0))
+            
+            def ex_int(y):
+                h = np.sqrt(R_EARTH**2 + y**2 + 2*y*R_EARTH*np.cos(th)) - R_EARTH
+                return extinction_coefficient(h, self.lam) if h < H_ATMOS else 0
+            dp, _ = quad(ex_int, 0, min(self.z, 50000))
+            ext = -10 * np.log10(np.exp(-dp))
+            return {'loss': geo + ext, 'turb_qber': sigR2}
+
+# =============================================================================
+# PROTOCOL ENGINE
+# =============================================================================
+
+def binary_entropy(p):
+    if p <= 0 or p >= 1: return 0
+    return -p * np.log2(p) - (1-p) * np.log2(1-p)
+
+class ProtocolEngine:
+    def __init__(self, p_type, hw):
+        self.p_type = p_type
+        self.hw = hw
+
+    def calculate_skr(self, props, intrinsic_qber, qscale):
+        if self.p_type == 'Classical (Normal Channel)': return {'skr': 0, 'useful': 0, 'leakage': 0, 'qber': intrinsic_qber}
+        
+        loss_total_db = props['loss'] + self.hw['rx_loss']
+        eta = (10**(-loss_total_db/10)) * self.hw['det_eff']
+        y0 = self.hw['dark_rate'] / self.hw['rep_rate']
+        e_ch = intrinsic_qber + qscale * props['turb_qber']
+        mu = self.hw['mu']
+
+        if 'BB84' in self.p_type:
+            y1 = 1 - (1-y0)*(1-eta)
+            e1 = (0.5 * y0 + e_ch * (y1 - y0)) / y1 if y1 > 0 else 0.5
+            q_mu = 1 - (1-y0)*np.exp(-mu * eta)
+            e_mu = (0.5 * y0 + e_ch * (q_mu - y0)) / q_mu if q_mu > 0 else 0.5
+            useful = 0.5 * mu * np.exp(-mu) * y1 * (1 - binary_entropy(e1))
+            leakage = 0.5 * q_mu * self.hw['f_ec'] * binary_entropy(e_mu)
+            return {'skr': max(0, useful - leakage), 'useful': useful, 'leakage': leakage, 'qber': e_mu}
+        
+        elif 'MDI' in self.p_type:
+            y11 = (mu**2 * np.exp(-2*mu)) * (eta**2)
+            useful = 0.25 * y11 * (1 - binary_entropy(e_ch))
+            q_tot = eta**2 
+            e_tot = (e_ch * q_tot + 0.5 * y0) / (q_tot + y0) if q_tot > 0 else 0.5
+            leakage = 0.25 * q_tot * self.hw['f_ec'] * binary_entropy(e_tot)
+            return {'skr': max(0, useful - leakage), 'useful': useful, 'leakage': leakage, 'qber': e_tot}
+
+# =============================================================================
+# GUI APPLICATION
+# =============================================================================
 
 class SimulationGUI:
-    def __init__(self, master):
-        self.master = master
-        master.title("QKD Satellite Simulation")
-        master.geometry("1100x850") # Adjusted size
-        self.create_widgets()
-
-    def create_widgets(self):
-        input_frame = ttk.LabelFrame(self.master, text="Input Parameters")
-        input_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ns")
-
-        ttk.Label(input_frame, text="Wavelength (nm):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        self.wavelength_entry = ttk.Entry(input_frame); self.wavelength_entry.grid(row=1, column=0, padx=5, pady=2, sticky="ew"); self.wavelength_entry.insert(0, "850")
-
-        ttk.Separator(input_frame, orient='horizontal').grid(row=2, column=0, sticky='ew', pady=5)
-        ttk.Label(input_frame, text="Protocol:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
-        self.protocol_type = tk.StringVar(value="Decoy-State BB84")
-
-        protocol_options = ["Decoy-State BB84", "MDI-QKD", "Classical (Normal Channel)"]
-        self.protocol_combo = ttk.Combobox(input_frame, textvariable=self.protocol_type, values=protocol_options, state="readonly")
-        self.protocol_combo.grid(row=4, column=0, padx=5, pady=2, sticky="ew")
-
-        ttk.Separator(input_frame, orient='horizontal').grid(row=5, column=0, sticky='ew', pady=5)
-
-        ttk.Label(input_frame, text="Graph Type:").grid(row=6, column=0, sticky="w", padx=5, pady=2)
-        self.graph_type = tk.StringVar(value="SKR vs. Range")
-        graph_options = [
-            "SKR vs. Range", "Channel Loss vs. Range", "QBER vs. Range",
-            "Received Power vs. Tx Power", "QBER vs. Channel Loss",
-            "SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)",
-            "SKR vs. QBER", "Key Rate Components vs. Range",
-            "QBER vs. Eve's Attack" 
-        ]
-        self.graph_combo = ttk.Combobox(input_frame, textvariable=self.graph_type, values=graph_options, state="readonly")
-        self.graph_combo.grid(row=7, column=0, padx=5, pady=2, sticky="ew")
-        self.graph_combo.bind("<<ComboboxSelected>>", self.toggle_inputs)
-
-        ttk.Separator(input_frame, orient='horizontal').grid(row=8, column=0, sticky='ew', pady=5)
-
+    def __init__(self, root):
+        self.root = root
+        self.root.title("QKD Satellite Simulator Pro")
+        self.root.geometry("1400x950")
         
-        self.link_type = tk.StringVar(value="ISL")
-        ttk.Label(input_frame, text="Link Type:").grid(row=9, column=0, sticky="w", padx=5, pady=2)
-        ttk.Radiobutton(input_frame, text="Inter-Satellite (ISL)", variable=self.link_type, value="ISL", command=self.toggle_inputs).grid(row=10, column=0, sticky="w", padx=10)
-        ttk.Radiobutton(input_frame, text="Ground-to-Satellite", variable=self.link_type, value="GTS", command=self.toggle_inputs).grid(row=11, column=0, sticky="w", padx=10)
+        style = ttk.Style()
+        style.configure("Header.TLabelframe.Label", font=("Segoe UI", 11, "bold"))
 
+        main_frame = ttk.Frame(root, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        settings_pane = ttk.LabelFrame(main_frame, text="Configurations", padding=10)
+        settings_pane.pack(side=tk.LEFT, fill=tk.Y, padx=5)
         
-        self.range_label = ttk.Label(input_frame, text="Range Parameter (km):")
-        self.range_label.grid(row=12, column=0, sticky="w", padx=5, pady=2)
-        self.range_entry = ttk.Entry(input_frame); self.range_entry.grid(row=13, column=0, padx=5, pady=2); self.range_entry.insert(0, "500")
+        cv = tk.Canvas(settings_pane, width=340, highlightthickness=0)
+        sb = ttk.Scrollbar(settings_pane, orient="vertical", command=cv.yview)
+        self.f = ttk.Frame(cv)
+        self.f.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.create_window((0, 0), window=self.f, anchor="nw")
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
 
-        ttk.Label(input_frame, text="Divergence (mrad):").grid(row=14, column=0, sticky="w", padx=5, pady=2)
-        self.divergence_entry = ttk.Entry(input_frame); self.divergence_entry.grid(row=15, column=0, padx=5, pady=2); self.divergence_entry.insert(0, "0.032")
+        self.setup_inputs()
 
-        self.turbulence_label = ttk.Label(input_frame, text="Turbulence:")
-        self.turbulence_label.grid(row=16, column=0, sticky="w", padx=5, pady=2)
-        self.turbulence_combo = ttk.Combobox(input_frame, values=['low', 'medium', 'high'], state="readonly");
-        self.turbulence_combo.grid(row=17, column=0, padx=5, pady=2); self.turbulence_combo.set('low')
+        results_container = ttk.Frame(main_frame)
+        results_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5)
 
-        self.pointing_label = ttk.Label(input_frame, text="Pointing Error (µrad):")
-        self.pointing_label.grid(row=18, column=0, sticky="w", padx=5, pady=2)
-        self.pointing_entry = ttk.Entry(input_frame); self.pointing_entry.grid(row=19, column=0, padx=5, pady=2); self.pointing_entry.insert(0, "1.0")
+        self.dashboard_frame = ttk.LabelFrame(results_container, text="Real-Time System Performance Dashboard", padding=15)
+        self.dashboard_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
 
-        ttk.Label(input_frame, text="Intrinsic QBER (%):").grid(row=20, column=0, sticky="w", padx=5, pady=2)
-        self.qber_entry = ttk.Entry(input_frame); self.qber_entry.grid(row=21, column=0, padx=5, pady=2); self.qber_entry.insert(0, "0.5")
+        self.skr_val = tk.StringVar(value="--")
+        self.avg_skr_val = tk.StringVar(value="--")
+        self.loss_val = tk.StringVar(value="--")
+        self.qber_val = tk.StringVar(value="--")
 
-        self.qber_scale_label = ttk.Label(input_frame, text="QBER Scaling Factor:")
-        self.qber_scale_label.grid(row=22, column=0, sticky="w", padx=5, pady=2)
-        self.qber_scale_entry = ttk.Entry(input_frame);
-        self.qber_scale_entry.grid(row=23, column=0, padx=5, pady=2); self.qber_scale_entry.insert(0, "0.1")
+        db_grid = ttk.Frame(self.dashboard_frame)
+        db_grid.pack(fill=tk.X)
+        self.create_db_item(db_grid, "PEAK SKR (ZENITH)", self.skr_val, 0, "bits/pulse", "#2980b9")
+        self.create_db_item(db_grid, "AVERAGE SKR (PASS)", self.avg_skr_val, 1, "bits/pulse", "#8e44ad")
+        self.create_db_item(db_grid, "TOTAL SYSTEM LOSS", self.loss_val, 2, "dB", "#2c3e50")
+        self.create_db_item(db_grid, "EFFECTIVE QBER", self.qber_val, 3, "%", "#c0392b")
 
-        
-        ttk.Separator(input_frame, orient='horizontal').grid(row=24, column=0, sticky='ew', pady=5)
-
-        ttk.Label(input_frame, text="Detector Efficiency (%):").grid(row=25, column=0, sticky="w", padx=5, pady=2)
-        self.det_eff_entry = ttk.Entry(input_frame)
-        self.det_eff_entry.grid(row=26, column=0, padx=5, pady=2); self.det_eff_entry.insert(0, "50.0")
-
-        ttk.Label(input_frame, text="Receiver Optics Loss (dB):").grid(row=27, column=0, sticky="w", padx=5, pady=2)
-        self.rx_loss_entry = ttk.Entry(input_frame)
-        self.rx_loss_entry.grid(row=28, column=0, padx=5, pady=2); self.rx_loss_entry.insert(0, "3.0")
-
-       
-        self.tx_power_min_label = ttk.Label(input_frame, text="Min Tx Power (dBm):")
-        self.tx_power_min_label.grid(row=29, column=0, sticky="w", padx=5, pady=2)
-        self.tx_power_min_entry = ttk.Entry(input_frame)
-        self.tx_power_min_entry.grid(row=30, column=0, padx=5, pady=2); self.tx_power_min_entry.insert(0, "-20")
-
-        self.tx_power_max_label = ttk.Label(input_frame, text="Max Tx Power (dBm):")
-        self.tx_power_max_label.grid(row=31, column=0, sticky="w", padx=5, pady=2)
-        self.tx_power_max_entry = ttk.Entry(input_frame)
-        self.tx_power_max_entry.grid(row=32, column=0, padx=5, pady=2); self.tx_power_max_entry.insert(0, "10")
-
-        # --- Plot Frame ---
-        plot_frame = ttk.LabelFrame(self.master, text="Simulation Results")
-        plot_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        plot_pane = ttk.LabelFrame(results_container, text="Performance Simulation Curve", padding=10)
+        plot_pane.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
         self.fig = Figure(figsize=(8, 6), dpi=100); self.ax = self.fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_pane)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # --- Control Frame ---
-        control_frame = ttk.Frame(self.master)
-        control_frame.grid(row=1, column=0, columnspan=2, pady=5)
-        run_button = ttk.Button(control_frame, text="Run Simulation", command=self.run_simulation)
-        run_button.pack()
-        self.status_label = ttk.Label(self.master, text="Status: Ready")
-        self.status_label.grid(row=2, column=0, columnspan=2, pady=2)
+    def create_db_item(self, master, label, var, col, unit, color):
+        frame = tk.Frame(master, bg="#fdfdfd", highlightbackground="#e1e1e1", highlightthickness=1, padx=10, pady=10)
+        frame.grid(row=0, column=col, padx=5, sticky="ew")
+        master.grid_columnconfigure(col, weight=1)
+        tk.Label(frame, text=label, font=("Segoe UI", 8, "bold"), fg="#7f8c8d", bg="#fdfdfd").pack()
+        tk.Label(frame, textvariable=var, font=("Courier New", 14, "bold"), fg=color, bg="#fdfdfd").pack()
+        tk.Label(frame, text=unit, font=("Segoe UI", 7), fg="#bdc3c7", bg="#fdfdfd").pack()
 
-        self.master.grid_columnconfigure(1, weight=1); self.master.grid_rowconfigure(0, weight=1)
-        self.toggle_inputs()
+    def setup_inputs(self):
+        self.protocol = tk.StringVar(value="Decoy-State BB84")
+        self.add_cb("Protocol:", self.protocol, ["Decoy-State BB84", "MDI-QKD", "Classical (Normal Channel)"])
+        self.link = tk.StringVar(value="GTS")
+        ttk.Label(self.f, text="Link Type:").pack(anchor="w")
+        ttk.Radiobutton(self.f, text="ISL (Vacuum)", variable=self.link, value="ISL", command=self.toggle).pack(anchor="w", padx=10)
+        ttk.Radiobutton(self.f, text="GTS (Atmosphere)", variable=self.link, value="GTS", command=self.toggle).pack(anchor="w", padx=10)
+        self.graph = tk.StringVar(value="SKR vs. Range")
+        g_opts = ["SKR vs. Range", "Total System Loss vs. Range", "QBER vs. Range", "Received Power vs. Tx Power", "QBER vs. Channel Loss", "SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)", "SKR vs. QBER", "Key Rate Components vs. Range", "QBER vs. Eve's Attack"]
+        self.add_cb("Graph Type:", self.graph, g_opts)
+        self.params = {}
+        h_data = [("Wavelength (nm)", "850"), ("Satellite Altitude (km)", "500"), ("Max Slant Range (km)", "1000"), ("Divergence (mrad)", "0.006"), ("Tx Aperture (m)", "0.3"), ("Rx Aperture (m)", "1.2"), ("Dark Rate (Hz)", "500"), ("Rep Rate (MHz)", "100"), ("Det. Efficiency (%)", "50.0"), ("Rx Optics Loss (dB)", "3.0")]
+        for l, d in h_data: self.add_ent(l, d)
+        self.turb = tk.StringVar(value="low")
+        self.turb_lbl = ttk.Label(self.f, text="Turbulence Strength:")
+        self.turb_lbl.pack(anchor="w")
+        self.turb_cb = ttk.Combobox(self.f, textvariable=self.turb, values=["low", "medium", "high"], state="readonly")
+        self.turb_cb.pack(fill="x", padx=5, pady=2)
+        p_data = [("Pointing Error (µrad)", "1.0"), ("Intrinsic QBER (%)", "1.2"), ("Signal Intensity (mu)", "0.5"), ("Error Corr. Eff. (f)", "1.16"), ("QBER Scaling Factor", "0.15"), ("Min Tx Power (dBm)", "-20"), ("Max Tx Power (dBm)", "10")]
+        for l, d in p_data: self.add_ent(l, d)
+        ttk.Button(self.f, text="RUN MISSION SIMULATION", command=self.run).pack(fill="x", pady=15)
+        self.status = ttk.Label(self.f, text="Ready", foreground="blue"); self.status.pack(); self.toggle()
 
-    def toggle_inputs(self, event=None):
-        is_isl = self.link_type.get() == "ISL"
-        graph_choice = self.graph_type.get()
-        self.turbulence_label.config(state='disabled' if is_isl else 'normal')
-        self.turbulence_combo.config(state='disabled' if is_isl else 'normal')
-        self.pointing_label.config(state='normal' if is_isl else 'disabled')
-        self.pointing_entry.config(state='normal' if is_isl else 'disabled')
-        self.qber_scale_label.config(state='disabled' if is_isl else 'normal')
-        self.qber_scale_entry.config(state='disabled' if is_isl else 'normal')
-        is_power_graph = graph_choice == "Received Power vs. Tx Power"
-        self.tx_power_min_label.config(state='normal' if is_power_graph else 'disabled')
-        self.tx_power_min_entry.config(state='normal' if is_power_graph else 'disabled')
-        self.tx_power_max_label.config(state='normal' if is_power_graph else 'disabled')
-        self.tx_power_max_entry.config(state='normal' if is_power_graph else 'disabled')
-        
-        if graph_choice in ["SKR vs. Pointing Error (ISL)", "SKR vs. Turbulence (GTS)", "SKR vs. QBER", "Received Power vs. Tx Power", "QBER vs. Eve's Attack"]:
-             self.range_label.config(text="Fixed Range (km):")
-        else:
-             self.range_label.config(text="Max Range (km):")
+    def add_cb(self, l, v, o):
+        ttk.Label(self.f, text=l).pack(anchor="w")
+        ttk.Combobox(self.f, textvariable=v, values=o, state="readonly").pack(fill="x", padx=5, pady=2)
 
-    def update_plot(self, x_data, y_data, title, xlabel, ylabel, yscale='linear', **kwargs):
-        self.ax.clear()
-        valid_data = isinstance(x_data, (list, np.ndarray)) and \
-                     isinstance(y_data, (list, np.ndarray)) and \
-                     len(x_data) > 0 and len(x_data) == len(y_data)
-        
-        is_bar = kwargs.get('is_bar', False)
+    def add_ent(self, l, d):
+        ttk.Label(self.f, text=l).pack(anchor="w")
+        e = ttk.Entry(self.f); e.insert(0, d); e.pack(fill="x", padx=5, pady=2); self.params[l] = e
 
-        if not valid_data:
-            self.ax.text(0.5, 0.5, 'No valid data to plot', ha='center', va='center', transform=self.ax.transAxes)
-            full_x_range_valid = False
-        else:
-            full_x_range_valid = True
-            if not is_bar:
-                try: min_x, max_x = min(x_data), max(x_data)
-                except TypeError: full_x_range_valid = False
+    def toggle(self):
+        st = 'normal' if self.link.get() == "GTS" else 'disabled'
+        self.turb_lbl.config(state=st); self.turb_cb.config(state=st)
+        self.params["Pointing Error (µrad)"].config(state='disabled' if self.link.get() == "GTS" else 'normal')
+
+    def run(self):
+        self.status.config(text="Processing...", foreground="red"); self.root.update_idletasks()
+        try:
+            cfg = {
+                'wavelength_nm': float(self.params["Wavelength (nm)"].get()),
+                'alt_km': float(self.params["Satellite Altitude (km)"].get()),
+                'range_km': float(self.params["Satellite Altitude (km)"].get()),
+                'divergence_mrad': float(self.params["Divergence (mrad)"].get()),
+                'tx_aperture': float(self.params["Tx Aperture (m)"].get()),
+                'rx_aperture': float(self.params["Rx Aperture (m)"].get()),
+                'link_type': self.link.get(), 'turb_lvl': self.turb.get(),
+                'pointing_error': float(self.params["Pointing Error (µrad)"].get()),
+                'dark_rate': float(self.params["Dark Rate (Hz)"].get()),
+                'rep_rate': float(self.params["Rep Rate (MHz)"].get()) * 1e6,
+                'det_eff': float(self.params["Det. Efficiency (%)"].get()) / 100.0,
+                'rx_loss': float(self.params["Rx Optics Loss (dB)"].get()),
+                'mu': float(self.params["Signal Intensity (mu)"].get()),
+                'f_ec': float(self.params["Error Corr. Eff. (f)"].get()),
+                'intrinsic_qber': float(self.params["Intrinsic QBER (%)"].get()) / 100.0,
+                'qscale': float(self.params["QBER Scaling Factor"].get())
+            }
+
+            self.ax.clear(); g = self.graph.get(); pe = ProtocolEngine(self.protocol.get(), cfg)
             
-            if is_bar:
-                 bar_labels = [str(x) for x in x_data]
-                 self.ax.bar(bar_labels, y_data)
-            else:
-                self.ax.plot(x_data, y_data, 'o-', label=kwargs.get('label1'))
-                if 'y2' in kwargs and isinstance(kwargs['y2'], (list, np.ndarray)) and len(kwargs['y2']) == len(x_data):
-                    self.ax.plot(x_data, kwargs['y2'], 's--', label=kwargs.get('label2'))
-                if kwargs.get('label1') or kwargs.get('label2'):
-                    self.ax.legend()
+            # Helper to calculate Total System Loss (Dynamic)
+            def get_total_sys_loss(channel_loss_db):
+                hw_loss = cfg['rx_loss']
+                det_penalty = -10 * np.log10(cfg['det_eff']) if cfg['det_eff'] > 0 else 100
+                return channel_loss_db + hw_loss + det_penalty
 
-        self.ax.set_title(title); self.ax.set_xlabel(xlabel); self.ax.set_ylabel(ylabel)
-        self.ax.grid(True)
+            # Zenith Snapshot for Dashboard
+            z_props = QuantumLink(cfg).get_properties()
+            z_res = pe.calculate_skr(z_props, cfg['intrinsic_qber'], cfg['qscale'])
+            
+            self.skr_val.set(f"{z_res['skr']:.2e}")
+            self.loss_val.set(f"{get_total_sys_loss(z_props['loss']):.2f}")
+            self.qber_val.set(f"{z_res['qber']*100:.2f}")
 
-        if full_x_range_valid and not is_bar:
-            padding = (max_x - min_x) * 0.02 if max_x > min_x else 1
-            self.ax.set_xlim(min_x - padding, max_x + padding)
+            # --- GRAPH BRANCHES ---
 
-        try:
-            has_positive_y = any(y > 0 for y in y_data) if valid_data else False
-            if yscale == 'log' and has_positive_y:
-                if is_bar:
-                    self.ax.set_yscale('log')
-                elif valid_data:
-                     filtered_data = [(x, y) for x, y in zip(x_data, y_data) if y > 0]
-                     if filtered_data:
-                         x_filt, y_filt_main = zip(*filtered_data)
-                         self.ax.clear()
-                         self.ax.plot(x_filt, y_filt_main, 'o-', label=kwargs.get('label1'))
-                         if 'y2' in kwargs:
-                             y2_data = kwargs.get('y2')
-                             if isinstance(y2_data, (list, np.ndarray)) and len(y2_data) == len(x_data):
-                                 y2_filt_pairs = [(x, y2) for x, y, y2 in zip(x_data, y_data, y2_data) if y > 0 and y2 > 0]
-                                 if y2_filt_pairs:
-                                     x_filt_y2, y2_filt = zip(*y2_filt_pairs)
-                                     self.ax.plot(x_filt_y2, y2_filt, 's--', label=kwargs.get('label2'))
-                         if kwargs.get('label1') or kwargs.get('label2'): self.ax.legend()
-                         self.ax.set_yscale('log')
-                         self.ax.set_title(title); self.ax.set_xlabel(xlabel); self.ax.set_ylabel(ylabel); self.ax.grid(True)
-                         padding = (max_x - min_x) * 0.02 if max_x > min_x else 1
-                         self.ax.set_xlim(min_x - padding, max_x + padding)
-                     else: self.ax.set_yscale('linear')
-                else: self.ax.set_yscale('linear')
-            else: self.ax.set_yscale('linear')
-        except (ValueError, TypeError): self.ax.set_yscale('linear')
-
-        self.fig.tight_layout(); self.canvas.draw()
-        
-    def run_simulation(self):
-        self.status_label.config(text="Status: Running..."); self.master.update_idletasks()
-
-        try:
-            protocol_choice = self.protocol_type.get()
-            link_type = self.link_type.get()
-            range_param = float(self.range_entry.get())
-            divergence = float(self.divergence_entry.get())
-            wavelength_nm = float(self.wavelength_entry.get())
-            graph_choice = self.graph_type.get()
-            intrinsic_qber = float(self.qber_entry.get()) / 100.0
-            qber_scaling_factor = float(self.qber_scale_entry.get())
-            pointing_error_val = float(self.pointing_entry.get())
-            turbulence_choice = self.turbulence_combo.get()
-            detector_efficiency = float(self.det_eff_entry.get()) / 100.0
-            receiver_optics_loss_db = float(self.rx_loss_entry.get())
-        except ValueError:
-            self.status_label.config(text="Status: Error - Invalid numerical input.")
-            self.update_plot([], [], "Error", "Invalid Input", "")
-            return
-
-        # --- DYNAMIC PROTOCOL SELECTION (UPDATED) ---
-        if protocol_choice == "Decoy-State BB84":
-            protocol = DecoyBB84Protocol()
-        elif protocol_choice == "MDI-QKD":
-            protocol = MDIQKDProtocol()
-        elif protocol_choice == "Classical (Normal Channel)":
-            protocol = ClassicalProtocol()
-        else:
-            self.status_label.config(text="Status: Error - Unknown protocol.")
-            return
-
-        # --- Main Dispatcher Logic ---
-        
-        # Graphs vs. a primary variable (Range)
-        if graph_choice in ["SKR vs. Range", "Channel Loss vs. Range", "QBER vs. Range", "QBER vs. Channel Loss", "Key Rate Components vs. Range"]:
-            start_range_km = max(10, range_param / 10)
-            ranges_km = np.linspace(start_range_km, range_param, 30)
-            results = {'loss': [], 'qber': [], 'skr': [], 'useful': [], 'leakage': []}
-            valid_run = True
-            for r in ranges_km:
-                try:
-                    if link_type == 'ISL':
-                        channel = InterSatelliteLink(range_km=r, divergence_mrad=divergence, wavelength_nm=wavelength_nm, pointing_error_urad=pointing_error_val)
-                        props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
-                    else: # GTS
-                        channel = GroundToSatelliteLink(range_km=r, divergence_mrad=divergence, wavelength_nm=wavelength_nm, turbulence_strength=turbulence_choice)
-                        props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber, qber_rytor_scaling=qber_scaling_factor)
-                    if not all(np.isfinite(v) for v in props.values()): raise ValueError(f"Non-finite channel prop @ {r}km")
-                    res = protocol.calculate_skr(props, detector_efficiency, receiver_optics_loss_db)
-                    if not all(np.isfinite(v) for v in res.values()): raise ValueError(f"Non-finite SKR @ {r}km")
-                    results['loss'].append(props['channel_loss_db']); results['qber'].append(props['effective_qber'])
-                    results['skr'].append(res['skr']); results['useful'].append(res['useful_rate']); results['leakage'].append(res['leakage_rate'])
-                except Exception as e:
-                    self.status_label.config(text=f"Status: Error - {e}"); valid_run = False; break
-            if valid_run:
-                # Plotting logic for "vs. Range" graphs
-                if graph_choice == "SKR vs. Range":
-                    self.update_plot(ranges_km, results['skr'], f"{protocol_choice} on {link_type}", "Range (km)", "SKR (bits/pulse)", yscale='log')
-                    self.status_label.config(text=f"Status: Complete. Final SKR @ {range_param} km: {results['skr'][-1]:.2e} bits/pulse")
-                elif graph_choice == "Channel Loss vs. Range":
-                    self.update_plot(ranges_km, results['loss'], f"{link_type} Channel Loss", "Range (km)", "Channel Loss (dB)", yscale='linear')
-                    self.status_label.config(text=f"Status: Complete. Final Channel Loss @ {range_param} km: {results['loss'][-1]:.2f} dB")
-                elif graph_choice == "QBER vs. Range":
-                     qber_percent = [q*100 for q in results['qber']]
-                     self.update_plot(ranges_km, qber_percent, f"{link_type} Performance", "Range (km)", "Effective QBER (%)", yscale='linear')
-                     self.status_label.config(text=f"Status: Complete. Final QBER @ {range_param} km: {results['qber'][-1]:.2%}")
-                elif graph_choice == "QBER vs. Channel Loss":
-                    qber_percent = [q*100 for q in results['qber']]
-                    valid_losses = [l for l in results['loss'] if np.isfinite(l)]
-                    valid_qbers = [q for i, q in enumerate(qber_percent) if np.isfinite(results['loss'][i])]
-                    if len(valid_losses) > 0 and len(valid_losses) == len(valid_qbers):
-                        self.update_plot(valid_losses, valid_qbers, f"{link_type} Performance", "Channel Loss (dB)", "Effective QBER (%)", yscale='linear')
-                        self.status_label.config(text=f"Status: Complete. Final QBER: {results['qber'][-1]:.2%}")
-                    else:
-                        self.update_plot([], [], f"{link_type} Performance", "Channel Loss (dB)", "Effective QBER (%)", status="No valid loss data.")
-                elif graph_choice == "Key Rate Components vs. Range":
-                    self.update_plot(ranges_km, results['useful'], f"{protocol_choice} Components on {link_type}", "Range (km)", "Rate (bits/pulse)", yscale='log',
-                                     y2=results['leakage'], label1='Useful Rate', label2='Leakage Rate')
-                    self.status_label.config(text=f"Status: Complete. Key component analysis.")
-        
-        # Graphs where range is fixed
-        elif graph_choice == "Received Power vs. Tx Power":
-            try:
-                if link_type == 'ISL':
-                    channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, pointing_error_urad=pointing_error_val)
-                    props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
-                else:
-                    channel = GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, turbulence_strength=turbulence_choice)
-                    props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber, qber_rytor_scaling=qber_scaling_factor)
-                if not np.isfinite(props['channel_loss_db']): raise ValueError("Channel loss calc failed")
-                total_system_loss_db = props['channel_loss_db'] + receiver_optics_loss_db + (-10*np.log10(detector_efficiency) if detector_efficiency > 0 else np.inf)
-                min_tx = float(self.tx_power_min_entry.get()); max_tx = float(self.tx_power_max_entry.get())
-                tx_powers_dbm = np.linspace(min_tx, max_tx, 30)
-                rx_powers_dbm = tx_powers_dbm - total_system_loss_db
-                self.update_plot(tx_powers_dbm, rx_powers_dbm, f"{link_type} Link Budget @ {range_param} km", "Transmitted Power (dBm)", "Received Power (dBm)")
-                self.status_label.config(text=f"Status: Complete. Total System Loss: {total_system_loss_db:.2f} dB")
-            except Exception as e:
-                 self.status_label.config(text=f"Status: Error - {e}"); self.update_plot([], [], "Error", "Calculation Error", "")
-
-        elif graph_choice == "SKR vs. Pointing Error (ISL)":
-            pointing_errors = np.linspace(0.5, 5.0, 30); skr_results = []; valid_run = True
-            for pe in pointing_errors:
-                try:
-                    channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, pointing_error_urad=pe)
-                    props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
-                    if not np.isfinite(props['channel_loss_db']): props['channel_loss_db'] = 200
-                    res = protocol.calculate_skr(props, detector_efficiency, receiver_optics_loss_db); skr_results.append(res['skr'])
-                except Exception as e: self.status_label.config(text=f"Status: Error - {e}"); valid_run = False; break
-            if valid_run:
-                self.update_plot(pointing_errors, skr_results, f"{protocol_choice} @ {range_param}km", "Pointing Error (µrad)", "SKR (bits/pulse)", yscale='log')
-                self.status_label.config(text=f"Status: Complete. Pointing error analysis.")
-
-        elif graph_choice == "SKR vs. Turbulence (GTS)":
-            turbulence_levels = ['low', 'medium', 'high']; skr_results = []; valid_run = True
-            for tl in turbulence_levels:
-                 try:
-                    channel = GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, turbulence_strength=tl)
-                    props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber, qber_rytor_scaling=qber_scaling_factor)
-                    if not np.isfinite(props['channel_loss_db']): props['channel_loss_db'] = 200
-                    res = protocol.calculate_skr(props, detector_efficiency, receiver_optics_loss_db); skr_results.append(res['skr'])
-                 except Exception as e: self.status_label.config(text=f"Status: Error - {e}"); valid_run = False; break
-            if valid_run:
-                self.update_plot(turbulence_levels, skr_results, f"{protocol_choice} @ {range_param}km", "Turbulence Strength", "SKR (bits/pulse)", is_bar=True, yscale='log')
-                self.status_label.config(text=f"Status: Complete. Turbulence resilience analysis.")
-
-        elif graph_choice == "SKR vs. QBER":
-            qber_values = np.linspace(0, 0.15, 30); skr_results = []; valid_run = True
-            try:
-                if link_type == 'ISL':
-                    channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, pointing_error_urad=pointing_error_val)
-                    base_props = channel.get_channel_properties(intrinsic_qber=0)
-                else:
-                    channel = GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, turbulence_strength=turbulence_choice)
-                    base_props = channel.get_channel_properties(intrinsic_qber=0, qber_rytor_scaling=0)
-                if not np.isfinite(base_props['channel_loss_db']): raise ValueError("Base loss calc failed")
-                base_channel_loss = base_props['channel_loss_db']
-                for qber in qber_values:
-                    current_props = {'channel_loss_db': base_channel_loss, 'effective_qber': qber}
-                    res = protocol.calculate_skr(current_props, detector_efficiency, receiver_optics_loss_db); skr_results.append(res['skr'])
-            except Exception as e: self.status_label.config(text=f"Status: Error - {e}"); valid_run = False
-            if valid_run:
-                self.update_plot(qber_values * 100, skr_results, f"{protocol_choice} @ {range_param}km ({base_channel_loss:.1f} dB Channel Loss)", "Total Effective QBER (%)", "SKR (bits/pulse)", yscale='log')
-                self.status_label.config(text=f"Status: Complete. Error tolerance analysis.")
-
-        # --- QBER VS EVE ---
-        elif graph_choice == "QBER vs. Eve's Attack":
-            try:
-                # 1. Get the base channel QBER (no attack)
-                if link_type == 'ISL':
-                    channel = InterSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, pointing_error_urad=pointing_error_val)
-                    base_props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber)
-                else:
-                    channel = GroundToSatelliteLink(range_km=range_param, divergence_mrad=divergence, wavelength_nm=wavelength_nm, turbulence_strength=turbulence_choice)
-                    base_props = channel.get_channel_properties(intrinsic_qber=intrinsic_qber, qber_rytor_scaling=qber_scaling_factor)
+            if g in ["SKR vs. Range", "Total System Loss vs. Range", "QBER vs. Range", "Key Rate Components vs. Range"]:
+                start = cfg['alt_km'] if cfg['link_type'] == "GTS" else 10.0
+                end = float(self.params["Max Slant Range (km)"].get())
+                x = np.linspace(start, end, 30); y1, y2 = [], []
+                for r in x:
+                    c = cfg.copy(); c['range_km'] = r
+                    p = QuantumLink(c).get_properties()
+                    res = pe.calculate_skr(p, cfg['intrinsic_qber'], cfg['qscale'])
+                    if "SKR" in g: y1.append(res['skr'])
+                    elif "Loss" in g: y1.append(get_total_sys_loss(p['loss']))
+                    elif "QBER" in g: y1.append(res['qber']*100)
+                    elif "Components" in g: y1.append(res['useful']); y2.append(res['leakage'])
                 
-                base_qber = base_props['effective_qber']
-                if not np.isfinite(base_qber): raise ValueError("Base QBER calc failed")
+                if "SKR" in g: self.avg_skr_val.set(f"{np.mean(y1):.2e}")
+                self.ax.plot(x, y1, 'o-', color='#2980b9', label="Primary" if y2 else None)
+                if y2: self.ax.plot(x, y2, 's--', color='#e67e22', label="Leakage")
+                if "SKR" in g or "Components" in g: self.ax.set_yscale('log')
+                self.ax.set_xlabel("Slant Range (km)")
+                self.ax.set_ylabel(g.split(' ')[0])
 
-                # 2. Create X-axis (attack intensity)
-                x_attack_levels = np.linspace(0, 1, 30) # 0% to 100% attack
-                
-                # 3. Calculate QBER for QKD
-                # Eve introduces 25% QBER on the fraction of the signal she attacks
-                qkd_qber = (1 - x_attack_levels) * base_qber + (x_attack_levels * 0.25)
-                
-                # 4. Calculate QBER for Classical
-                # QBER is unchanged, Eve's attack is undetectable
-                classical_qber = np.full_like(x_attack_levels, base_qber)
-                
-                # 5. Plot both lines
-                self.update_plot(x_attack_levels * 100, qkd_qber * 100, 
-                                 f"QKD vs Classical: Eavesdropping Detection ({link_type} @ {range_param}km)", 
-                                 "Eavesdropping Attack Intensity (%)", 
-                                 "Measured QBER (%)", 
-                                 yscale='linear',
-                                 y2=classical_qber * 100, 
-                                 label1="QKD (BB84/MDI)", 
-                                 label2="Classical Channel")
-                self.status_label.config(text=f"Status: Complete. QKD shows detectable error increase.")
-            except Exception as e:
-                self.status_label.config(text=f"Status: Error - {e}"); self.update_plot([], [], "Error", "Calculation Error", "")
+            elif g == "Received Power vs. Tx Power":
+                tx = np.linspace(float(self.params["Min Tx Power (dBm)"].get()), float(self.params["Max Tx Power (dBm)"].get()), 20)
+                rx = tx - z_props['loss'] - cfg['rx_loss']
+                self.ax.plot(tx, rx, 'o-', color='#2980b9')
+                self.ax.set_xlabel("Tx Power (dBm)"); self.ax.set_ylabel("Rx Power (dBm)")
 
+            elif g == "QBER vs. Channel Loss":
+                losses = np.linspace(10, 60, 20); y = []
+                for l in losses:
+                    eta = (10**(-l/10)) * cfg['det_eff']; y0 = cfg['dark_rate']/cfg['rep_rate']
+                    q = (0.5 * y0 + cfg['intrinsic_qber'] * eta) / (eta + y0)
+                    y.append(q*100)
+                self.ax.plot(losses, y, 'x-', color='#c0392b'); self.ax.set_xlabel("Channel Loss (dB)"); self.ax.set_ylabel("QBER (%)")
+
+            elif g == "SKR vs. Pointing Error (ISL)":
+                x = np.linspace(0.1, 5.0, 20); y = []
+                for p in x:
+                    c = cfg.copy(); c['pointing_error'] = p
+                    p_props = QuantumLink(c).get_properties()
+                    y.append(pe.calculate_skr(p_props, cfg['intrinsic_qber'], cfg['qscale'])['skr'])
+                self.ax.plot(x, y, 'o-', color='#8e44ad'); self.ax.set_yscale('log'); self.ax.set_xlabel("Pointing Error (µrad)"); self.ax.set_ylabel("SKR")
+                self.avg_skr_val.set(f"{np.mean(y):.2e}")
+
+            elif g == "SKR vs. Turbulence (GTS)":
+                lvls = ['low', 'medium', 'high']; y = []
+                for l in lvls:
+                    c = cfg.copy(); c['turb_lvl'] = l
+                    p_props = QuantumLink(c).get_properties(); y.append(pe.calculate_skr(p_props, cfg['intrinsic_qber'], cfg['qscale'])['skr'])
+                self.ax.bar(lvls, y, color=['#3498db', '#e67e22', '#e74c3c']); self.ax.set_yscale('log'); self.ax.set_ylabel("SKR")
+                self.avg_skr_val.set(f"{np.mean(y):.2e}")
+
+            elif g == "SKR vs. QBER":
+                x = np.linspace(0, 0.15, 20); y = []
+                for q in x: y.append(pe.calculate_skr(z_props, q, 0)['skr'])
+                self.ax.plot(x*100, y, 'o-', color='#27ae60'); self.ax.set_yscale('log'); self.ax.set_xlabel("Intrinsic QBER (%)"); self.ax.set_ylabel("SKR")
+                self.avg_skr_val.set(f"{np.mean(y):.2e}")
+
+            elif g == "QBER vs. Eve's Attack":
+                x = np.linspace(0, 1, 20); base_q = cfg['intrinsic_qber'] + cfg['qscale'] * z_props['turb_qber']
+                self.ax.plot(x*100, ((1-x)*base_q + x*0.25)*100, 'o-', label="QKD", color='#2980b9')
+                self.ax.plot(x*100, np.full_like(x, base_q)*100, '--', label="Classical", color='#7f8c8d')
+                self.ax.legend(); self.ax.set_xlabel("Attack Intensity (%)"); self.ax.set_ylabel("QBER (%)")
+
+            if self.ax.get_legend_handles_labels()[0]: self.ax.legend()
+            self.ax.set_title(g); self.ax.grid(True, alpha=0.3); self.fig.tight_layout(); self.canvas.draw()
+            self.status.config(text="Simulation Complete", foreground="#27ae60")
+        except Exception as e: self.status.config(text=f"Error: {e}", foreground="#c0392b")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = SimulationGUI(root)
-    root.mainloop()
+    root = tk.Tk(); SimulationGUI(root); root.mainloop()

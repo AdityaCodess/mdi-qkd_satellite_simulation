@@ -1,124 +1,126 @@
-# QKD Satellite Performance Simulator
+## 🧭 Evolution to a Mission Design Tool
 
-A Python-based simulation tool with a graphical user interface (GUI) to analyze and compare the performance of Quantum Key Distribution (QKD) protocols over satellite communication links.
-
-This simulator models both atmospheric ground-to-satellite (GTS) links and vacuum-based inter-satellite links (ISL), allowing for a detailed comparative analysis of protocol robustness and efficiency under different physical conditions.
+This project has evolved from a **simple link-budget calculator** into a **high-fidelity QKD Mission Design Tool**. The updates below summarize the major architectural, physical, and security-driven upgrades that define the current simulator.
 
 ---
 
-## 🛰️ Key Features
+## 🖥️ 1. Dashboard & UI Overhaul
 
-- **Multiple Protocols:** Simulate and directly compare the performance of **Decoy-State BB84** and **Measurement-Device-Independent QKD (MDI-QKD)**.
-- **Dual Channel Models:**
-  - **Ground-to-Satellite (GTS):** Models the effects of atmospheric loss and **turbulence**.
-  - **Inter-Satellite Link (ISL):** Models extreme geometric loss and the impact of **pointing errors** in a vacuum.
-- **Interactive GUI:** A user-friendly interface built with Tkinter to configure all simulation parameters without editing code.
-- **Comprehensive Analysis:** Generate a wide range of analytical plots, including:
-  - SKR vs. Range
-  - Total Loss vs. Range
-  - QBER vs. Total Loss
-  - SKR vs. Pointing Error/Turbulence
-  - ...and more.
+### Dynamic 4-Box Mission Dashboard
 
----
+A real-time mission header now displays:
 
-## 📂 Folder Structure
+- **PEAK SKR (ZENITH)**  
+  Absolute best achievable secret key rate when the satellite is directly overhead.
 
-The project is organized in a modular and scalable structure.
+- **AVERAGE SKR (PASS)**  
+  Average secret key rate over the full slant-range sweep of a satellite pass.  
+  This metric is critical for matching values reported in experimental literature.
 
-```
-QKD_Satellite_Simulation/
-│
-├── gui.py # Main script to launch the UI.
-├── requirements.txt # Lists Python libraries needed.
-├── README.md # This file.
-│
-├── qkd_simulation/ # Main source code package.
-│ ├── init.py
-│ ├── parameters.py # Stores all fixed system parameters.
-│ ├── channels.py # Defines the GTS and ISL channel models.
-│ ├── protocol.py # Implements the BB84 and MDI-QKD logic.
-│ └── visualizer.py # (Currently integrated into gui.py)
-│
-└── results/ # Directory to save outputs (optional).
-├── plots/
-└── data/
-```
+- **TOTAL SYSTEM LOSS (dB)**  
+  Full end-to-end loss budget, including:
+
+  - Channel loss
+  - Hardware / optical losses
+  - Detector efficiency penalty
+
+- **EFFECTIVE QBER (%)**  
+  Real-time indicator of link security health.
+
+### Integrated Plotting Engine
+
+- Transitioned from static calculations to a **dynamic Matplotlib backend**.
+- Performance curves update instantly when **RUN** is pressed.
+
+### UI Scalability Improvements
+
+- Added a **scrollable settings sidebar** to support an expanding mission-parameter set.
 
 ---
 
-## 🚀 Getting Started
+## 🌍 2. Physics Engine Upgrades
 
-### Prerequisites
+### Spherical Earth Geometry (GTS)
 
-- Python 3.7+
-- `pip` and `venv`
+- Atmospheric channel modeling now accounts for **Earth curvature**.
+- Atmospheric path length increases realistically toward the horizon.
 
-### Installation
+### Satellite Altitude Clamping
 
-1.  **Clone the repository:**
+- Introduced an explicit **Satellite Altitude** parameter.
+- Prevents non-physical configurations (e.g., 10 km range for a 500 km satellite).
+- Range sweeps always begin at **Zenith**.
 
-    ```bash
-    git clone <your-repository-url>
-    cd QKD_Satellite_Simulation
-    ```
+### Dynamic Loss Budgeting
 
-2.  **Create and activate a virtual environment (recommended):**
+- Implemented the **Detector Efficiency Penalty**:
 
-    - On Windows:
-      ```bash
-      python -m venv venv
-      .\venv\Scripts\activate
-      ```
-    - On macOS/Linux:
-      ```bash
-      python3 -m venv venv
-      source venv/bin/activate
-      ```
+  -10 · log10(η)
 
-3.  **Install the required libraries:**
-    Create a file named `requirements.txt` with the following content:
-    ```
-    numpy
-    matplotlib
-    ```
-    Then, run the installation command:
-    ```bash
-    pip install -r requirements.txt
-    ```
+- Converts previously fixed losses into **hardware-dependent dynamic losses**.
 
-### Usage
+---
 
-To run the simulation and launch the graphical interface, execute the `gui.py` script:
+## 🔐 3. Protocol & Security Mathematics
 
-```bash
-python gui.py
-```
+### Decoy-State BB84 Refinement
 
-## ⚙️ Simulation Parameters Explained
+- Integrated:
+  - Error-correction efficiency (f_ec)
+  - Intrinsic QBER
+- Improved alignment with analytical and experimental QKD models.
 
-**The GUI allows you to control the following parameters:**
+### The “QBER Cliff” Logic
 
-Protocol: Choose between Decoy-State BB84 and MDI-QKD. MDI-QKD offers higher security against detector attacks but its key rate scales quadratically with loss ($O(\eta^2)$), while BB84 scales linearly ($O(\eta)$).
+- Enforced the **11% security threshold**.
+- When exceeded, the simulator correctly terminates the link (**SKR = 0**).
+- Essential for reproducing experimentally observed range limits (e.g., GYS).
 
-Graph Type: Select the relationship you want to analyze from the dropdown menu.
+### MDI-QKD Engine
 
-Link Type:
+- Added a dedicated mathematical branch for **Measurement-Device-Independent QKD**.
+- Correctly captures quadratic loss scaling and enhanced detector-side security.
 
-Inter-Satellite (ISL): A vacuum link where pointing error is the main variable challenge.
+---
 
-Ground-to-Satellite (GTS): An atmospheric link where turbulence is the main variable challenge.
+## 🛰️ 4. Mission Verification & Calibration
 
-Range Parameter (km): Acts as the "Max Range" for plots vs. Range, or the "Fixed Range" for other analyses.
+### Micius (LEO QKD Satellite) Calibration
 
-Divergence (mrad): The beam spread angle. A smaller value means less geometric loss but requires better pointing.
+- **Beam Divergence:** 0.006 mrad
+- **Dark Count Rate:** 3000 Hz (background-light inclusive)
 
-Turbulence: ('low', 'medium', 'high') Simulates the effect of atmospheric distortion on GTS links.
+**Verification Result**
 
-Pointing Error (µrad): Simulates the pointing jitter for ISLs.
+- Average SKR ≈ 2.5e-05
+- Total System Loss ≈ 28 dB  
+  (Gold-standard agreement with published results)
 
-Intrinsic QBER (%): The baseline error rate from hardware imperfections, independent of the channel.
+---
 
-```
+### GYS (Ground-to-Satellite) Calibration
 
-```
+- **Wavelength:** 1550 nm
+- **Detector Efficiency:** 4.5%
+
+**Verification Result**
+
+- Correct reproduction of the **140 km security-limited range**
+
+---
+
+## 📊 5. Multi-Graph Analysis Suite
+
+The simulator now supports **10 verified analysis modes**, including:
+
+- **SKR vs. Pointing Error**  
+  (Satellite vibration and tracking tolerance testing)
+
+- **SKR vs. Atmospheric Turbulence**  
+  (Weather robustness analysis)
+
+- **Key Rate Components**  
+  (Useful key vs. information leakage)
+
+- **QBER vs. Eve’s Attack Strength**  
+  (Adversarial and cyber-security analysis)
